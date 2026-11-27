@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Журнал дій — комірник</title>
+<style>
+  :root {
+    --blue: #3B82C4;
+    --green: #2FA86A;
+    --red: #D9534F;
+    --bg: #F4F6F8;
+    --card: #FFFFFF;
+    --text: #1F2933;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    background: var(--bg); color: var(--text);
+    display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 20px;
+  }
+  .card {
+    background: var(--card); border-radius: 16px; padding: 24px;
+    width: 100%; max-width: 480px; box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+    margin-top: 10px;
+  }
+  h1 { font-size: 20px; margin: 0 0 16px; text-align: center; }
+  input[type=text], input[type=password], input[type=date] {
+    width: 100%; padding: 14px; font-size: 16px; border-radius: 10px;
+    border: 1px solid #CBD2D9; margin-bottom: 14px;
+  }
+  button {
+    width: 100%; padding: 16px; font-size: 17px; font-weight: 600;
+    border: none; border-radius: 10px; cursor: pointer; color: white;
+  }
+  .btn-start { background: var(--green); }
+  .btn-end { background: var(--red); }
+  .status-box { text-align: center; margin-bottom: 18px; }
+  .status-box .name { font-size: 19px; font-weight: 700; margin-bottom: 6px; }
+  .status-box .timer { font-size: 32px; font-weight: 700; color: var(--blue); font-variant-numeric: tabular-nums; }
+  .status-box .since { font-size: 13px; color: #727B85; margin-top: 4px; }
+  .msg { text-align: center; font-size: 14px; margin-top: 12px; min-height: 18px; }
+  .msg.error { color: var(--red); }
+  .msg.ok { color: var(--green); }
+  .admin-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 14px; }
+  .admin-table th, .admin-table td { padding: 6px 8px; border-bottom: 1px solid #E4E7EB; text-align: left; }
+  .admin-table tr.long { background: #FDEAEA; }
+  .admin-table tr.active { background: #EAF4FD; }
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
+  .filters input { width: auto; margin-bottom: 0; padding: 8px; }
+  .quick-btn { padding: 8px 12px; border-radius: 8px; border: 1px solid #CBD2D9; background: white; cursor: pointer; font-size: 13px; width: auto; color: var(--text); font-weight: 500; }
+  .quick-btn.active { background: var(--blue); color: white; border-color: var(--blue); }
+  .summary { font-size: 13px; color: #44505B; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<div id="app"></div>
+
+<script>
+// ВСТАВ СЮДИ URL деплою Apps Script (Деплой → Керувати деплоями → Веб-застосунок → URL)
+const SCRIPT_URL = 'ВСТАВ_СЮДИ_URL_ДЕПЛОЮ_APPS_SCRIPT';
+// Поріг (у хвилинах), після якого дія підсвічується в звіті як "задовго" — зміни на свій розсуд
+const LONG_ACTION_THRESHOLD_MIN = 90;
+
+const params = new URLSearchParams(location.search);
+const isAdmin = params.get('admin') === '1';
+
+async function callApi(payload) {
+  const res = await fetch(SCRIPT_URL, { method: 'POST', body: JSON.stringify(payload) });
+  return res.json();
+}
+
+function fmtDuration(min) {
+  if (min == null) return '—';
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return h > 0 ? `${h} год ${m} хв` : `${m} хв`;
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleString('uk-UA', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+function escapeHtml(s) {
+  return (s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ---------- OPERATOR VIEW ----------
+let timerInterval = null;
+let currentStart = null;
+
+function renderOperator(status) {
+  clearInterval(timerInterval);
+  const app = document.getElementById('app');
+  if (status && status.active) {
+    currentStart = new Date(status.start);
+    app.innerHTML = `
+      <div class="card">
+        <h1>Журнал дій</h1>
+        <div class="status-box">
+          <div class="name">${escapeHtml(status.name)}</div>
+          <div class="timer" id="timer">00:00:00</div>
+          <div class="since">з ${fmtTime(status.start)}</div>
+        </div>
+        <input type="text" id="resultInput" placeholder="Результат (необов'язково, напр. 40 ящиків)">
+        <button class="btn-end" id="endBtn">Завершити дію</button>
+        <div class="msg" id="msg"></div>
+      </div>`;
+    document.getElementById('endBtn').onclick = onEnd;
+    document.getElementById('resultInput').addEventListener('keydown', e => { if (e.key === 'Enter') onEnd(); });
+    tickTimer();
+    timerInterval = setInterval(tickTimer, 1000);
+  } else {
+    app.innerHTML = `
+      <div class="card">
+        <h1>Журнал дій</h1>
+        <input type="text" id="nameInput" placeholder="Що зараз робиш?" autofocus>
+        <button class="btn-start" id="startBtn">Почати дію</button>
+        <div class="msg" id="msg"></div>
+      </div>`;
+    document.getElementById('startBtn').onclick = onStart;
+    document.getElementById('nameInput').addEventListener('keydown', e => { if (e.key === 'Enter') onStart(); });
+  }
+}
+
+function tickTimer() {
+  const el = document.getElementById('timer');
+  if (!el || !currentStart) return;
+  const diff = Math.max(0, Date.now() - currentStart.getTime());
+  const s = Math.floor(diff / 1000);
+  const hh = String(Math.floor(s / 3600)).padStart(2, '0');
+  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  el.textContent = `${hh}:${mm}:${ss}`;
+}
+
+async function loadStatus() {
+  try {
+    const status = await callApi({ action: 'getStatus' });
+    renderOperator(status);
+  } catch (err) {
+    document.getElementById('app').innerHTML = `<div class="card"><div class="msg error">Помилка з'єднання. Перевір інтернет і спробуй знову.</div></div>`;
+  }
+}
+
+async function onStart() {
+  const input = document.getElementById('nameInput');
+  const msg = document.getElementById('msg');
+  const name = input.value.trim();
+  if (!name) { msg.className = 'msg error'; msg.textContent = 'Введи, що робиш'; return; }
+  document.getElementById('startBtn').disabled = true;
+  const res = await callApi({ action: 'startAction', name });
+  if (res.success) {
+    loadStatus();
+  } else if (res.error === 'already_active') {
+    msg.className = 'msg error';
+    msg.textContent = `Вже активна дія "${res.active.name}" — спочатку заверши її`;
+    document.getElementById('startBtn').disabled = false;
+    setTimeout(loadStatus, 1200);
+  } else {
+    msg.className = 'msg error';
+    msg.textContent = res.error || 'Помилка';
+    document.getElementById('startBtn').disabled = false;
+  }
+}
+
+async function onEnd() {
+  document.getElementById('endBtn').disabled = true;
+  const resultInput = document.getElementById('resultInput');
+  const result = resultInput ? resultInput.value.trim() : '';
+  const res = await callApi({ action: 'endAction', result });
+  if (res.success) {
+    loadStatus();
+  } else {
+    const msg = document.getElementById('msg');
+    msg.className = 'msg error';
+    msg.textContent = res.error || 'Помилка';
+    document.getElementById('endBtn').disabled = false;
+  }
+}
+
+// ---------- ADMIN VIEW ----------
+function renderAdminLogin() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    <div class="card">
+      <h1>Звіт — вхід</h1>
+      <input type="password" id="pwInput" placeholder="Пароль">
+      <button class="btn-start" id="loginBtn">Увійти</button>
+      <div class="msg error" id="msg"></div>
+    </div>`;
+  document.getElementById('pwInput').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('loginBtn').click(); });
+  document.getElementById('loginBtn').onclick = async () => {
+    const pw = document.getElementById('pwInput').value;
+    const r = quickRange('today');
+    const res = await callApi({ action: 'getReport', password: pw, from: r.from, to: r.to });
+    if (res.success === false && res.error === 'Невірний пароль') {
+      document.getElementById('msg').textContent = 'Невірний пароль';
+    } else {
+      sessionStorage.setItem('admin_pw', pw);
+      renderAdminReport(r);
+    }
+  };
+}
+
+function dateStr(d) { return d.toISOString().slice(0, 10); }
+
+function quickRange(type) {
+  const today = new Date();
+  let from, to;
+  if (type === 'today') { from = to = today; }
+  else if (type === 'week') { from = new Date(today); from.setDate(today.getDate() - 6); to = today; }
+  else if (type === 'month') { from = new Date(today.getFullYear(), today.getMonth(), 1); to = today; }
+  else if (type === 'lastmonth') { from = new Date(today.getFullYear(), today.getMonth() - 1, 1); to = new Date(today.getFullYear(), today.getMonth(), 0); }
+  return { from: dateStr(from), to: dateStr(to) };
+}
+
+async function renderAdminReport(range) {
+  const app = document.getElementById('app');
+  const pw = sessionStorage.getItem('admin_pw');
+  const r = range || quickRange('today');
+  app.innerHTML = `
+    <div class="card" style="max-width:720px;">
+      <h1>Звіт по діях комірника</h1>
+      <div class="filters">
+        <button class="quick-btn" data-r="today">Сьогодні</button>
+        <button class="quick-btn" data-r="week">Тиждень</button>
+        <button class="quick-btn" data-r="month">Місяць</button>
+        <button class="quick-btn" data-r="lastmonth">Минулий місяць</button>
+        <input type="date" id="fromDate" value="${r.from}">
+        <input type="date" id="toDate" value="${r.to}">
+        <button class="quick-btn" id="applyBtn">Застосувати</button>
+        <button class="quick-btn" id="csvBtn">📊 CSV</button>
+      </div>
+      <div class="summary" id="summary">Завантаження...</div>
+      <table class="admin-table" id="table"></table>
+    </div>`;
+  document.querySelectorAll('.quick-btn[data-r]').forEach(b => {
+    b.onclick = () => { renderAdminReport(quickRange(b.dataset.r)); };
+  });
+  document.getElementById('applyBtn').onclick = () => {
+    renderAdminReport({ from: document.getElementById('fromDate').value, to: document.getElementById('toDate').value });
+  };
+
+  const res = await callApi({ action: 'getReport', password: pw, from: r.from, to: r.to });
+  if (!res.success) {
+    document.getElementById('summary').textContent = res.error;
+    return;
+  }
+  const rows = res.rows;
+  const totalMin = rows.reduce((s, x) => s + (x.durationMin || 0), 0);
+  const longCount = rows.filter(x => x.durationMin && x.durationMin > LONG_ACTION_THRESHOLD_MIN).length;
+  document.getElementById('summary').innerHTML =
+    `Дій: ${rows.length} · Загальний час: ${fmtDuration(totalMin)} · Довгих дій (&gt;${LONG_ACTION_THRESHOLD_MIN} хв): <b>${longCount}</b>`;
+
+  const table = document.getElementById('table');
+  table.innerHTML = `<tr><th>Дія</th><th>Початок</th><th>Кінець</th><th>Тривалість</th><th>Результат</th></tr>` +
+    rows.map(x => {
+      const cls = !x.end ? 'active' : (x.durationMin > LONG_ACTION_THRESHOLD_MIN ? 'long' : '');
+      return `<tr class="${cls}">
+        <td>${escapeHtml(x.name)}</td>
+        <td>${fmtTime(x.start)}</td>
+        <td>${x.end ? fmtTime(x.end) : 'ще триває'}</td>
+        <td>${fmtDuration(x.durationMin)}</td>
+        <td>${escapeHtml(x.result)}</td>
+      </tr>`;
+    }).join('');
+
+  document.getElementById('csvBtn').onclick = () => {
+    const csvRows = [['Дія', 'Початок', 'Кінець', 'Тривалість_хв', 'Результат']].concat(
+      rows.map(x => [x.name, fmtTime(x.start), x.end ? fmtTime(x.end) : 'ще триває', x.durationMin || '', x.result || ''])
+    );
+    const csv = csvRows.map(row => row.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `zvit_komirnyk_${r.from}_${r.to}.csv`;
+    a.click();
+  };
+}
+
+// ---------- INIT ----------
+if (isAdmin) {
+  const savedPw = sessionStorage.getItem('admin_pw');
+  if (savedPw) { renderAdminReport(); } else { renderAdminLogin(); }
+} else {
+  document.getElementById('app').innerHTML = `<div class="card"><h1>Журнал дій</h1><div class="msg">Завантаження...</div></div>`;
+  loadStatus();
+}
+</script>
+</body>
+</html>
